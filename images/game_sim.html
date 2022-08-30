@@ -1,0 +1,590 @@
+<html>
+<head>
+    <title>Game Simulator | BZLEARNING</title>
+    <meta property="og:image" content="http://www.bzlearning.com/images/sim_thumbnail.PNG" />
+    <meta property="og:url" content="http://www.bzlearning.com/game_sim.html" />
+    <meta property="og:description" content="Game Simulator for Alligators, Dice & Doors" />
+    <meta property="og:title" content="Game Simulator | BZLEARNING" />
+</head>
+<body>
+    <div style="font: 12px Arial;">
+        <img id="board_v103" src="http://www.bzlearning.com/images/add_v103.png" width="0" height="0" />
+        <img id="board_v102" src="http://www.bzlearning.com/images/add_v102.png" width="0" height="0" />
+        <img id="board_v100" src="http://www.bzlearning.com/images/add_v100.png" width="0" height="0" />
+
+        <form name="game_config" style="border: 1px solid; padding: 5px; max-width: 640; background-color: #f0fff0;">
+            <a href="http://www.bzlearning.com"><img align="left" src="http://www.bzlearning.com/images/bzlogo.svg" width="100" /></a>
+            <h1 style="font: 18px Arial bold;">"Alligators, Dice & Doors" board game simulation.</h1>
+            <div>
+                Game Version:
+                <input type="radio" name="gameType" value="1.00" onclick="reset_game();" />v1.00
+                <input type="radio" name="gameType" value="1.02" onclick="reset_game();" />v1.02
+                <input type="radio" name="gameType" value="1.03" checked="checked" onclick="reset_game();" />v1.03
+            </div>
+            <div>
+                Speed:
+                <input type="range" id="speedSlider" min="0" max="500" value="500" onchange="onSpeedChange();" />
+            </div>
+            <div>
+                Games to Run:
+                <input type="range" id="gameCount" min="1" max="10000" value="1" oninput="onChangeGameCount();" />
+                <input type="text" id="gameCountLabel" readonly="readonly" size="5" value="1" />
+            </div>
+            <input type="button" style="border: 2px outset; background-color: lightgray;" id="startButton" onclick="simulate();" value="Start!" />
+            <input type="button" style="border: 2px outset; background-color: lightgray;" id="resetButton" onclick="reset_game();" value="Reset" />
+        </form>
+        Games Won vs Moves to Win<br/>
+        <canvas style="border: 2px ridge" id="graphCanvas" width="200" height="100"></canvas>
+        <textarea id="logBox" cols="58" rows="6" style="overflow-y: auto; border: 2px groove;" readonly="readonly"></textarea>
+        <canvas style="border: 2px groove;" id="gameCanvas" width="640" height="640"></canvas>
+        <script>
+
+            var GAME_STATES =
+            {
+                START: { value: 0, name: "Start" },
+                ROLL: { value: 1, name: "Roll" },
+                MOVE: { value: 2, name: "Move" },
+                MOVE_COMPLETE: { value: 3, name: "Move Complete" },
+                COMPLETE: { value: 4, name: "Complete" }
+            };
+
+            var SQUARE_TYPES =
+            {
+                NORMAL: { value: 0, name: "Normal" },
+                DOOR: { value: 1, name: "Door" },
+                ALLIGATOR: { value: 2, name: "Alligator" },
+                FINISH: { value: 3, name: "Finish" }
+
+            }
+
+            var canvas = document.getElementById('gameCanvas');
+            var context = canvas.getContext('2d');
+            var graph = document.getElementById('graphCanvas');
+            var graphctx = graph.getContext('2d');
+
+            var start_btn = document.getElementById('startButton');
+            var reset_btn = document.getElementById('resetButton');
+
+            var game_type;
+            var speed_slider = document.getElementById('speedSlider');
+            var game_count_ctl = document.getElementById('gameCount');
+            var game_count_lbl = document.getElementById('gameCountLabel');
+            var log_box = document.getElementById('logBox');
+
+            var img;                    // background board image
+            var rects = [];             // the board rectangles and square info
+            var win_map = [];           // array of games won per moves
+            var game_state;             // current game state
+            var cur_square;             // square we're on
+            var target_square;          // square we're moving to
+            var num_squares;            // total number of squares
+            var num_runs = 0;           // # plays through the game
+            var loop_timer;             // timer used during simulation
+            var sim_speed = 0;          // milliseconds delay between rolls/moves (from control)
+            var cur_speed = 0;          // milliseconds delay between rolls/moves (in use)
+            var current_board = "";     // current board we have loaded
+            var num_turns = 0;          // number of turns so far in game
+            var last_logged_turn = -1;  // Last one that got logged
+            var min_moves_taken = -1;   // Min moves to win
+            var max_moves_taken = -1;   // Max moves to win
+            var game_count = 1;         // Number of games to simulate at once
+
+            window.onload = function ()
+            {
+                reset_game();
+            }
+
+            // Write log to the text area
+            function write_log(new_text)
+            {
+                log_box.textContent += "\n";
+                var turn_text = "Turn " + num_turns + ": ";
+                if (last_logged_turn == num_turns)
+                {
+                    for (var i = 0; i < turn_text.length; i++)
+                        log_box.textContent += " ";
+                }
+                else
+                {
+                    log_box.textContent += turn_text;
+                }
+                last_logged_turn = num_turns;
+                log_box.textContent += new_text;
+                log_box.scrollTop = 99999;
+            }
+
+            // Enable/Disable buttons while simulating
+            function disable_buttons(disabled)
+            {
+                start_btn.disabled = disabled;
+                reset_btn.disabled = disabled;
+                game_count_ctl.disabled = disabled;
+            }
+
+            // Reset the game board
+            function reset_game()
+            {
+                disable_buttons(true);
+
+                var radios = document.getElementsByName('gameType');
+                for (var i = 0, length = radios.length; i < length; i++)
+                {
+                    if (radios[i].checked)
+                    {
+                        game_type = radios[i].value;
+                        break;
+                    }
+                }
+
+                win_map = [];
+                for (var i = 0; i < 100; i++)
+                    win_map[i] = 0;
+
+                setup(game_type);
+                min_moves_taken = -1;
+                max_moves_taken = -1;
+                num_runs = 0;
+                cur_square = 0;
+                log_box.textContent =
+                    "Game Simulator for Alligators, Dice & Doors\n" +
+                    "Written by Mike Ellison\n" +                    
+                    "Press 'START' to begin simulation.\n";
+
+                context.drawImage(img, 0, 0);
+                graphctx.fillStyle = "rgb(245,245,245)";
+                graphctx.fillRect(0, 0, 200, 100);
+                disable_buttons(false);
+            }
+
+            function onSpeedChange()
+            {
+                sim_speed = 500 - speed_slider.value;
+            }
+
+            function onChangeGameCount()
+            {
+                game_count = game_count_ctl.value;
+                game_count_lbl.value = game_count;
+            }
+
+            // Begin simulating an iteration of the game.
+            function simulate()
+            {
+                disable_buttons(true);
+                game_count = game_count_ctl.value;
+                game_state = GAME_STATES.START;
+                cur_square = 0;
+                num_turns = 0;
+
+                // Kick it off
+                cur_speed = sim_speed;
+                loop_timer = setInterval(sim_update, cur_speed);
+            }
+
+            function update_winmap()
+            {
+                graphctx.fillStyle = "rgb(245,245,245)";
+                graphctx.fillRect(0, 0, 200, 100);
+
+                graphctx.strokeStyle = "rgb(200,200,200)";
+                graphctx.lineWidth = 1;
+
+                graphctx.beginPath();
+                for (var i = 0; i < 50; i += 5)
+                {
+                    graphctx.moveTo(i * 4, 0);
+                    graphctx.lineTo(i * 4, 100);
+                }
+                graphctx.stroke();
+
+                var max_map = 0;
+                for (var i = 0; i < 50; i++)
+                {
+                    if (win_map[i] > max_map)
+                        max_map = win_map[i];
+                }
+
+                graphctx.strokeStyle = "red";
+                graphctx.lineWidth = 1;
+                graphctx.beginPath();
+                graphctx.moveTo(0, 100);
+                for (var i = 0; i < 50; i++)
+                {
+                    var y = 100 - (win_map[i] / max_map) * 100;
+                    graphctx.lineTo(i * 4, y);
+                }
+                graphctx.stroke();
+            }
+            // State machine for the game, called on the interval
+            // timer.
+            function sim_update()
+            {
+                var games_looped = 0;
+                var keep_going = true;
+                var first_pass = true;
+
+                // If we're only doing one game, we exit each state change.
+                // But if we're doing a bunch, that's really slow - so
+                // we keep going for 100 games at a time.
+                while (keep_going)
+                {
+                    switch (game_state)
+                    {
+                        case (GAME_STATES.START):
+                            // Update all squares for new run count.
+                            cur_square = 0;
+                            num_turns = 0;
+                            rects[cur_square].visits++;
+                            log_box.textContent = "";
+                            if (first_pass)
+                            {
+                                for (var i = 0; i < num_squares; i++)
+                                    update_square(i);
+                                update_winmap();
+                            }
+
+                            // reset game to beginning
+                            num_turns++;
+                            game_state = GAME_STATES.ROLL;
+                            break;
+
+                        case (GAME_STATES.ROLL):
+                            {
+                                var dice_val = roll_dice(rects[cur_square].dice);
+                                target_square = cur_square + dice_val;
+
+                                if (target_square >= num_squares)
+                                    target_square = num_squares - 1;
+
+                                game_state = GAME_STATES.MOVE;
+                            }
+                            break;
+
+                            // We may want to break this into multiple states
+                            // with animation sub-states later.
+                        case (GAME_STATES.MOVE):
+                            // Mark the visit and update cur_square
+                            if (game_count == 1)
+                                write_log("Moving from " + cur_square + " to " + target_square);
+                            rects[target_square].visits++;
+                            update_square(target_square);
+                            cur_square = target_square;
+
+                            switch (rects[cur_square].type)
+                            {
+                                case (SQUARE_TYPES.ALLIGATOR):
+                                    // Alligator squares require another normal roll
+                                    // in the same turn, only going backwards.
+                                    if (game_count == 1)
+                                        write_log("ALLIGATOR! RUN AWAY!")
+                                    game_state = GAME_STATES.ROLL;
+                                    break;
+
+                                case (SQUARE_TYPES.DOOR):
+                                    if (rects[cur_square].dest != 0)
+                                    {
+                                        if (game_count == 1)
+                                            write_log("Landed on a door!")
+                                        target_square = rects[cur_square].dest;
+                                    }
+                                    else
+                                    {
+                                        game_state = GAME_STATES.MOVE_COMPLETE;
+                                    }
+                                    break;
+                                case (SQUARE_TYPES.NORMAL):
+                                    game_state = GAME_STATES.MOVE_COMPLETE;
+                                    break;
+
+                                case (SQUARE_TYPES.FINISH):
+                                    game_state = GAME_STATES.COMPLETE;
+                                    break;
+                            }
+                            break;
+
+                        case GAME_STATES.MOVE_COMPLETE:
+                            num_turns++;
+                            game_state = GAME_STATES.ROLL;
+                            break;
+
+                        case GAME_STATES.COMPLETE:
+                            games_looped++;
+                            num_runs = num_runs + 1;
+                            if (num_turns < 100)
+                                win_map[num_turns]++;
+
+                            update_winmap();
+
+                            if ((min_moves_taken == -1) || (num_turns < min_moves_taken))
+                                min_moves_taken = num_turns;
+                            if ((max_moves_taken == -1) || (num_turns > max_moves_taken))
+                                max_moves_taken = num_turns;
+
+                            if (first_pass)
+                            {
+                                write_log("Game " + num_runs + " complete in " + num_turns + " moves!");
+                                write_log("Min moves to win: " + min_moves_taken + " Max moves to win:" + max_moves_taken);
+                            }
+
+                            game_count--;
+                            if (game_count > 0)
+                            {
+                                game_state = GAME_STATES.START;
+                            }
+                            else
+                            {
+                                clearInterval(loop_timer);
+                                disable_buttons(false);
+                            }
+                            break;
+                    }
+                    // Update speed if needed.
+                    if (cur_speed != sim_speed)
+                    {
+                        cur_speed = sim_speed;
+                        clearInterval(loop_timer);
+                        loop_timer = setInterval(sim_update, cur_speed);
+                    }
+
+                    first_pass = false;
+                    keep_going = false;
+                    if ((game_count > 1) && (games_looped < 100))
+                    {
+                        keep_going = true;
+                    }
+                } // end while (keep_going)
+            } // end function
+
+            // Roll the dice and return result
+            function roll_dice(dice_size)
+            {
+                var multiplier = 1;
+                var inc_val = 1;
+                var roll_val = 0;
+
+                // allow for negative rolls
+                if (dice_size < 0)
+                {
+                    multiplier = -1;
+                    inc_val = -1;
+                    dice_size *= -1;
+                }
+
+                // 10-sided dice go 0-9, all other dice go 1-n
+                if (dice_size == 10)
+                    inc_val = 0;
+
+                roll_val = Math.random() * dice_size;
+                roll_val = Math.floor(roll_val) * multiplier + inc_val;
+                if (game_count == 1)
+                    write_log("Rolled a " + roll_val + " on the " + dice_size + "-sided dice.");
+
+                return roll_val;
+            }
+
+            // Update the color for a square
+            function update_square(square_idx)
+            {
+                context.fillStyle = pick_color(square_idx);
+
+                context.fillRect(
+                    rects[square_idx].l,
+                    rects[square_idx].t,
+                    rects[square_idx].r - rects[square_idx].l,
+                    rects[square_idx].b - rects[square_idx].t);
+
+                context.fillStyle = "white";
+                context.font = "12px Arial";
+                context.lineWidth = 2;
+                context.strokeStyle = "black";
+
+                // Print square number
+                context.textAlign = "left";
+                context.strokeText(square_idx, rects[square_idx].l + 2, rects[square_idx].t + 14);
+                context.fillText(square_idx, rects[square_idx].l + 2, rects[square_idx].t + 14);
+
+                // Print visits count
+                context.textAlign = "right";
+                context.strokeText(rects[square_idx].visits, rects[square_idx].r, rects[square_idx].b, rects[square_idx].r - rects[square_idx].l);
+                context.fillText(rects[square_idx].visits, rects[square_idx].r, rects[square_idx].b, rects[square_idx].r - rects[square_idx].l);
+            }
+
+            // Pick a color for the square based on the number of times its
+            // been visited vs. the number of times the game has been run.
+            function pick_color(square_idx)
+            {
+                var hit_percent;
+                var r, g, b;
+                r = g = b = 0;
+
+                hit_percent = rects[square_idx].visits / (num_runs + 1);
+                if (hit_percent == 0)
+                {
+                    r = 0;
+                    g = 0;
+                    b = 0;
+                }
+                else if (hit_percent < .1)
+                {
+                    r = b = 0;
+                    g = hit_percent * 10 * 255;
+                }
+                else if (hit_percent < .5)
+                {
+                    b = 0;
+                    g = 255;
+                    r = (255 * (hit_percent - .1) * 2.5);
+                }
+                else if (hit_percent <= 1)
+                {
+                    r = 255;
+                    g = 255 - (255 * (hit_percent - .5) * 2);
+                    b = 0;
+                }
+                else
+                {
+                    var ratio = hit_percent - 1;
+                    r = 255;
+                    if (ratio >= 1)
+                    {
+                        b = 255;
+                        if (ratio - 1 < 1)
+                            r -= (ratio - 1) * 255;
+                        else
+                            r = 0;
+                    }
+                    else
+                        b = ratio * 255;
+
+                    g = 0;
+                }
+                r = Math.floor(r);
+                g = Math.floor(g);
+                b = Math.floor(b);
+                var fillString = "rgb(" + r + ", " + g + ", " + b + ")";
+                return fillString;
+            }
+
+            // define the board squares and base image
+            function setup(game_type)
+            {
+                var section_die_1;
+                var section_die_2;
+                if (game_type == "1.03")
+                {
+                    section_die_1 = 8;
+                    section_die_2 = 4;
+                    current_board = "Alligators, Dice & Doors v1.03";
+                    img = document.getElementById("board_v103");
+                }
+                else if (game_type == "1.02")
+                {
+                    section_die_1 = 12;
+                    section_die_2 = 4;
+                    current_board = "Alligators, Dice & Doors v1.02";
+                    img = document.getElementById("board_v102");
+                }
+                else if (game_type == "1.00")
+                {
+                    section_die_1 = 12;
+                    section_die_2 = 6;
+                    current_board = "Alligators, Dice & Doors v1.00";
+                    img = document.getElementById("board_v100");
+                }
+                rects = [];
+                //           Left    Top     Right   Bottom  Dice      Square Type                   Visits     Param  Door Dest
+
+                // First section, 20-sided
+                rects.push({ l: 39, t: 503, r: 134, b: 605, dice: 20, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // Start
+                rects.push({ l: 216, t: 553, r: 257, b: 591, dice: 20, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 1
+                rects.push({ l: 177, t: 552, r: 215, b: 591, dice: 20, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 2
+                rects.push({ l: 137, t: 553, r: 173, b: 591, dice: 20, type: SQUARE_TYPES.DOOR, visits: 0, p1: 1, dest: 49 }); // 3 DOOR 1->5
+                rects.push({ l: 259, t: 554, r: 297, b: 591, dice: 20, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 4
+                rects.push({ l: 300, t: 553, r: 338, b: 591, dice: 20, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 5
+                rects.push({ l: 341, t: 553, r: 379, b: 591, dice: 20, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 6
+                rects.push({ l: 383, t: 553, r: 421, b: 591, dice: 20, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 7
+                rects.push({ l: 425, t: 554, r: 463, b: 591, dice: 20, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 8
+                rects.push({ l: 466, t: 554, r: 504, b: 591, dice: 20, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 9
+                rects.push({ l: 507, t: 553, r: 545, b: 591, dice: 20, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 10
+                rects.push({ l: 549, t: 552, r: 600, b: 602, dice: -6, type: SQUARE_TYPES.ALLIGATOR, visits: 0, p1: 0, dest: 0 }); // 11 - Alligator
+
+                // 12-sided section
+                rects.push({ l: 548, t: 510, r: 587, b: 547, dice: 12, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 12
+                rects.push({ l: 549, t: 468, r: 587, b: 505, dice: 12, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 13
+                rects.push({ l: 548, t: 427, r: 587, b: 464, dice: 12, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 14
+                rects.push({ l: 549, t: 385, r: 587, b: 422, dice: 12, type: SQUARE_TYPES.DOOR, visits: 0, p1: 2, dest: 54 }); // 15 DOOR 2->6
+                rects.push({ l: 549, t: 344, r: 587, b: 381, dice: 12, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 16
+                rects.push({ l: 549, t: 303, r: 587, b: 340, dice: 12, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 17
+                rects.push({ l: 548, t: 262, r: 587, b: 299, dice: 12, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 18
+                rects.push({ l: 549, t: 220, r: 587, b: 257, dice: 12, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 19
+                rects.push({ l: 549, t: 179, r: 587, b: 216, dice: 12, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 20
+                rects.push({ l: 549, t: 138, r: 587, b: 175, dice: 12, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 21
+                rects.push({ l: 549, t: 99, r: 587, b: 136, dice: 12, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 22
+                rects.push({ l: 549, t: 43, r: 601, b: 95, dice: -6, type: SQUARE_TYPES.ALLIGATOR, visits: 0, p1: 0, dest: 0 });  // 23 ALLIGATOR
+
+                // 10-sided section
+                rects.push({ l: 507, t: 57, r: 545, b: 93, dice: 10, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 });  // 24
+                rects.push({ l: 466, t: 57, r: 504, b: 93, dice: 10, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 25
+                rects.push({ l: 425, t: 57, r: 463, b: 93, dice: 10, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 26
+                rects.push({ l: 382, t: 57, r: 420, b: 93, dice: 10, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 27
+                rects.push({ l: 341, t: 57, r: 379, b: 93, dice: 10, type: SQUARE_TYPES.DOOR, visits: 0, p1: 3, dest: 60 }); // 28  DOOR 3
+                rects.push({ l: 299, t: 57, r: 337, b: 93, dice: 10, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 29
+                rects.push({ l: 258, t: 57, r: 296, b: 94, dice: 10, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 30
+                rects.push({ l: 216, t: 57, r: 254, b: 93, dice: 10, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 31
+                rects.push({ l: 175, t: 57, r: 213, b: 93, dice: 10, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 32
+                rects.push({ l: 133, t: 57, r: 171, b: 94, dice: 10, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 33
+                rects.push({ l: 92, t: 57, r: 130, b: 94, dice: 10, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 34
+                rects.push({ l: 36, t: 43, r: 87, b: 92, dice: -6, type: SQUARE_TYPES.ALLIGATOR, visits: 0, p1: 0, dest: 0 }); // 35  Alligator
+
+                // 8-sided section
+                rects.push({ l: 51, t: 98, r: 89, b: 135, dice: 8, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 36
+                rects.push({ l: 51, t: 139, r: 89, b: 176, dice: 8, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 37
+                rects.push({ l: 51, t: 181, r: 89, b: 218, dice: 8, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 38
+                rects.push({ l: 51, t: 223, r: 89, b: 260, dice: 8, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 39
+                rects.push({ l: 51, t: 264, r: 89, b: 301, dice: 8, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 40
+                rects.push({ l: 51, t: 305, r: 89, b: 342, dice: 8, type: SQUARE_TYPES.DOOR, visits: 0, p1: 4, dest: 66 }); // 41 Door 4
+                rects.push({ l: 51, t: 347, r: 89, b: 384, dice: 8, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 42
+                rects.push({ l: 51, t: 388, r: 89, b: 425, dice: 8, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 43
+                rects.push({ l: 38, t: 430, r: 89, b: 481, dice: -6, type: SQUARE_TYPES.ALLIGATOR, visits: 0, p1: 0, dest: 0 }); // 44 ALLIGATOR
+                rects.push({ l: 93, t: 430, r: 131, b: 467, dice: 8, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 45
+                rects.push({ l: 134, t: 430, r: 172, b: 467, dice: 8, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 46
+                rects.push({ l: 175, t: 429, r: 213, b: 467, dice: 8, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 47
+                rects.push({ l: 217, t: 430, r: 255, b: 467, dice: 8, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 48
+                rects.push({ l: 258, t: 430, r: 296, b: 467, dice: 8, type: SQUARE_TYPES.DOOR, visits: 0, p1: 5, dest: 0 }); // 49 Door 5
+                rects.push({ l: 299, t: 430, r: 337, b: 467, dice: 8, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 50
+                rects.push({ l: 341, t: 430, r: 379, b: 467, dice: 8, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 51
+                rects.push({ l: 383, t: 430, r: 421, b: 467, dice: 8, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 52
+                rects.push({ l: 426, t: 430, r: 476, b: 480, dice: -6, type: SQUARE_TYPES.ALLIGATOR, visits: 0, p1: 0, dest: 0 }); // 53 Alligator
+
+                // in 1.03, this section uses the 8 sided die.
+                // in 1.02, it uses the 12 sided.
+                // in 1.0, it uses the 12 sided.
+                rects.push({ l: 426, t: 385, r: 464, b: 422, dice: section_die_1, type: SQUARE_TYPES.DOOR, visits: 0, p1: 6, dest: 0 }); // 54 Door 6
+                rects.push({ l: 425, t: 345, r: 463, b: 382, dice: section_die_1, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 55
+                rects.push({ l: 425, t: 305, r: 463, b: 342, dice: section_die_1, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 56
+                rects.push({ l: 427, t: 263, r: 465, b: 300, dice: section_die_1, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 57
+                rects.push({ l: 426, t: 222, r: 464, b: 259, dice: section_die_1, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 58
+                rects.push({ l: 425, t: 167, r: 476, b: 217, dice: -6, type: SQUARE_TYPES.ALLIGATOR, visits: 0, p1: 0, dest: 0 }); // 59  Alligator
+
+                // 4 sided section (1.02 and 1.03)
+                // 6 sided section (1.00)
+                rects.push({ l: 382, t: 181, r: 420, b: 218, dice: section_die_2, type: SQUARE_TYPES.DOOR, visits: 0, p1: 7, dest: 0 }); // 60 Door 7
+                rects.push({ l: 341, t: 181, r: 379, b: 218, dice: section_die_2, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 61
+                rects.push({ l: 299, t: 181, r: 337, b: 218, dice: section_die_2, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 62
+                rects.push({ l: 257, t: 182, r: 295, b: 219, dice: section_die_2, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 63
+                rects.push({ l: 217, t: 181, r: 255, b: 218, dice: section_die_2, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 64
+                rects.push({ l: 161, t: 168, r: 212, b: 219, dice: -6, type: SQUARE_TYPES.ALLIGATOR, visits: 0, p1: 0, dest: 0 }); // 65  Alligator
+
+                // 4 sided section (all)
+                rects.push({ l: 175, t: 223, r: 213, b: 260, dice: 4, type: SQUARE_TYPES.DOOR, visits: 0, p1: 8, dest: 0 }); // 66 Door 8
+                rects.push({ l: 174, t: 263, r: 212, b: 300, dice: 4, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 67
+                rects.push({ l: 162, t: 305, r: 213, b: 356, dice: -6, type: SQUARE_TYPES.ALLIGATOR, visits: 0, p1: 0, dest: 0 }); // 68 Alligator
+                rects.push({ l: 221, t: 304, r: 259, b: 341, dice: 4, type: SQUARE_TYPES.NORMAL, visits: 0, p1: 0, dest: 0 }); // 69
+                rects.push({ l: 267, t: 271, r: 372, b: 375, dice: 4, type: SQUARE_TYPES.FINISH, visits: 0, p1: 0, dest: 0 }); // FINISH
+                num_squares = rects.length;
+            }
+        </script>        
+    </div>
+</body>
+    
+</html>
